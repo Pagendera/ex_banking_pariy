@@ -3,8 +3,10 @@ defmodule ExBanking.ExBankingUserServer do
 
   alias ExBanking.{UserSupervisor, ExBankingValidator}
 
+  @request_time :timer.seconds(3)
+
   def start_link(user_name) do
-    GenServer.start_link(__MODULE__, %{}, name: {:global, user_name})
+    GenServer.start_link(__MODULE__, %{"requests_count" => 0}, name: {:global, user_name})
   end
 
   def init(state) do
@@ -32,6 +34,7 @@ defmodule ExBanking.ExBankingUserServer do
     else
       false -> {:error, :wrong_arguments}
       [] -> {:error, :user_does_not_exist}
+      :too_many_requests_to_user -> {:error, :too_many_requests_to_user}
     end
   end
 
@@ -44,6 +47,7 @@ defmodule ExBanking.ExBankingUserServer do
     else
       false -> {:error, :wrong_arguments}
       [] -> {:error, :user_does_not_exist}
+      :too_many_requests_to_user -> {:error, :too_many_requests_to_user}
     end
   end
 
@@ -57,6 +61,7 @@ defmodule ExBanking.ExBankingUserServer do
       false -> {:error, :wrong_arguments}
       [] -> {:error, :user_does_not_exist}
       :not_enough_money -> {:error, :not_enough_money}
+      :too_many_requests_to_user -> {:error, :too_many_requests_to_user}
     end
   end
 
@@ -75,25 +80,34 @@ defmodule ExBanking.ExBankingUserServer do
       end
     else
       false -> {:error, :wrong_arguments}
+      :too_many_requests_to_user -> {:error, :too_many_requests_to_user}
     end
   end
 
-  def handle_call({:get_balance}, _from, state = %{})  do
-    {:reply, state, state}
+  def handle_call({:get_balance}, _from, state = %{"requests_count" => requests}) when requests <= 10 do
+    Process.send_after(self(), :decrease_request, @request_time)
+
+    {:reply, state, state |> Map.update("requests_count", 0, fn count -> count + 1 end)}
   end
 
-  def handle_call({:deposit, amount, currency}, _from, state)  do
+  def handle_call({:deposit, amount, currency}, _from, state = %{"requests_count" => requests}) when requests <= 10  do
+    Process.send_after(self(), :decrease_request, @request_time)
+
     new_state =
       state
+      |> Map.update("requests_count", 0, fn count -> count + 1 end)
       |> Map.update(currency, amount, fn balance -> (balance / 1 + amount / 1) |> Float.round(2) end)
 
     {:reply, new_state, new_state}
   end
 
-  def handle_call({:withdraw, amount, currency}, _from, state) do
+  def handle_call({:withdraw, amount, currency}, _from, state = %{"requests_count" => requests}) when requests <= 10 do
+    Process.send_after(self(), :decrease_request, @request_time)
+
     with true <- ExBankingValidator.enough_balance?(state, currency, amount) do
       new_state =
         state
+        |> Map.update("requests_count", 0, fn count -> count + 1 end)
         |> Map.update(currency, amount, fn balance -> (balance / 1 - amount / 1) |> Float.round(2) end)
 
     {:reply, new_state, new_state}
@@ -102,12 +116,15 @@ defmodule ExBanking.ExBankingUserServer do
     end
   end
 
-  def handle_call({:send, to_pid, amount, currency}, _from, state) do
+  def handle_call({:send, to_pid, amount, currency}, _from, state = %{"requests_count" => requests}) when requests <= 10 do
+    Process.send_after(self(), :decrease_request, @request_time)
+
     if ExBankingValidator.enough_balance?(state, currency, amount) do
       case GenServer.call(to_pid, {:deposit, amount, currency}) do
         %{^currency => to_new_balance} ->
           new_state =
             state
+            |> Map.update("operation_count", 0, fn count -> count + 1 end)
             |> Map.update(currency, amount, fn balance -> (balance / 1 - amount / 1) |> Float.round(2) end)
 
           {:ok, new_balance} = ExBankingValidator.get_balance_from_state(new_state, currency)
@@ -119,5 +136,13 @@ defmodule ExBanking.ExBankingUserServer do
     else
       {:reply, :not_enough_money, state}
     end
+  end
+
+  def handle_call(_args, _from, state) do
+    {:reply, :too_many_requests_to_user, state}
+  end
+
+  def handle_info(:decrease_request, state) do
+    {:noreply, state |> Map.update("requests_count", 0, fn count -> count - 1 end)}
   end
 end
