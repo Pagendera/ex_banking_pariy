@@ -76,11 +76,13 @@ defmodule ExBanking.ExBankingUserServer do
         true ->
           [{_from_name, from_pid}] = from_user
           [{_to_name, to_pid}] = to_user
-          GenServer.call(from_pid, {:send, to_pid, amount, currency})
+          case GenServer.call(from_pid, {:send, to_pid, amount, currency}) do
+            :too_many_requests_to_user -> {:error, :too_many_requests_to_sender}
+            result -> result
+          end
       end
     else
       false -> {:error, :wrong_arguments}
-      :too_many_requests_to_user -> {:error, :too_many_requests_to_user}
     end
   end
 
@@ -124,17 +126,18 @@ defmodule ExBanking.ExBankingUserServer do
         %{^currency => to_new_balance} ->
           new_state =
             state
-            |> Map.update("operation_count", 0, fn count -> count + 1 end)
+            |> Map.update("requests_count", 0, fn count -> count + 1 end)
             |> Map.update(currency, amount, fn balance -> (balance / 1 - amount / 1) |> Float.round(2) end)
-
           {:ok, new_balance} = ExBankingValidator.get_balance_from_state(new_state, currency)
           {:reply, {:ok, new_balance, to_new_balance}, new_state}
 
+        :too_many_requests_to_user ->
+          {:reply, {:error, :too_many_requests_to_receiver}, state}
         {:error, reason} ->
           {:reply, {:error, reason}, state}
       end
     else
-      {:reply, :not_enough_money, state}
+      {:reply, {:error, :not_enough_money}, state}
     end
   end
 
